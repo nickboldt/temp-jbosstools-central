@@ -20,14 +20,22 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 import org.apache.maven.model.Dependency;
+import org.codehaus.plexus.util.StringUtils;
+import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IProject;
+import org.eclipse.core.resources.IResource;
+import org.eclipse.core.resources.IWorkspaceRoot;
+import org.eclipse.core.resources.ResourcesPlugin;
 import org.eclipse.core.runtime.CoreException;
+import org.eclipse.core.runtime.IPath;
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.NullProgressMonitor;
 import org.eclipse.core.runtime.jobs.IJobChangeEvent;
 import org.eclipse.core.runtime.jobs.IJobChangeListener;
 import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.jface.dialogs.Dialog;
+import org.eclipse.jface.dialogs.DialogSettings;
+import org.eclipse.jface.dialogs.IDialogSettings;
 import org.eclipse.jface.layout.GridDataFactory;
 import org.eclipse.jface.resource.JFaceResources;
 import org.eclipse.jface.viewers.ArrayContentProvider;
@@ -74,12 +82,6 @@ import org.jboss.tools.maven.ui.wizard.ConfigureMavenRepositoriesWizard;
 
 public class IdentifyMavenDependencyPage extends WizardPage {
 
-	/*
-	private static final String SOURCE_PROPERTY = "SOURCE_PROPERTY";
-
-	private static final String DEPENDENCY_PROPERTY = "DEPENDENCY_PROPERTY";
-    */
-	
 	private static final int DEPENDENCY_COLUMN = 2;
 
 	private Map<ProjectDependency, Dependency> dependencyMap;
@@ -88,7 +90,7 @@ public class IdentifyMavenDependencyPage extends WizardPage {
 
 	private List<ProjectDependency> initialEntries;
 
-	private Map<Dependency, Boolean> dependencyResolution = new ConcurrentHashMap<Dependency, Boolean>();
+	private Map<String, Boolean> dependencyResolution = new ConcurrentHashMap<String, Boolean>();
 
 	private IProject project;
 	
@@ -103,7 +105,7 @@ public class IdentifyMavenDependencyPage extends WizardPage {
 	
 	private Button deleteJarsBtn;
 	
-	private boolean deleteJars;
+	private boolean deleteJars = true;
 
 	private Button startIdentification;
 
@@ -113,6 +115,8 @@ public class IdentifyMavenDependencyPage extends WizardPage {
 
 	private Link warningLink;
 
+	private IDialogSettings dialogSettings;
+
 	private static String MESSAGE = "Identify existing project references as Maven dependencies. Double-click on a Maven dependency to edit its details";
 
 
@@ -121,6 +125,7 @@ public class IdentifyMavenDependencyPage extends WizardPage {
 		this.project = project;
 		initialEntries = Collections.unmodifiableList(entries);
 		initDependencyMap();
+		initDialogSettings();
 	}
 
 	private void initDependencyMap() {
@@ -129,8 +134,29 @@ public class IdentifyMavenDependencyPage extends WizardPage {
 				dependencyMap.put(entry, null);
 		}
 	}
+	
+    /** Loads the dialog settings using the page name as a section name. */
+	private void initDialogSettings() {
+	    IDialogSettings pluginSettings;
+	    
+	    // This is strictly to get SWT Designer working locally without blowing up.
+	    if( MavenDependencyConversionActivator.getDefault() == null ) {
+	      pluginSettings = new DialogSettings("Workbench");
+	    }
+	    else {
+	      pluginSettings = MavenDependencyConversionActivator.getDefault().getDialogSettings();      
+	    }
+	    
+	    dialogSettings = pluginSettings.getSection(getName());
+	    if(dialogSettings == null) {
+	      dialogSettings = pluginSettings.addNewSection(getName());
+	      pluginSettings.addSection(dialogSettings);
+	    }
+	}
 
 	public void dispose() {
+		
+		dialogSettings.put("isDeleteJars", isDeleteJars());
 		if (jarImage != null) jarImage.dispose();
 		if (okImage != null) okImage.dispose();
 		if (projectImage != null) projectImage.dispose();
@@ -210,6 +236,7 @@ public class IdentifyMavenDependencyPage extends WizardPage {
 	        }
 	      });
 
+		deleteJars = dialogSettings.getBoolean("isDeleteJars");
 		deleteJarsBtn = addCheckButton(container, "Delete original references from project", deleteJars);
 		deleteJarsBtn.addSelectionListener(new SelectionAdapter() {
 			public void widgetSelected(SelectionEvent e) {
@@ -265,7 +292,7 @@ public class IdentifyMavenDependencyPage extends WizardPage {
 			@Override
 			public String getToolTipText(Object element) {
 				ProjectDependency projectDependency = (ProjectDependency) element;
-				if (projectDependency.getDependencyKind() == DependencyKind.Project) {
+				if (projectDependency.getDependencyKind() != DependencyKind.Archive) {
 					return "";
 				}
 				try {
@@ -322,22 +349,13 @@ public class IdentifyMavenDependencyPage extends WizardPage {
 					if(editDependencyDialog.open() == Window.OK) {
 						Dependency newDep = editDependencyDialog.getDependency();
 						dependencyMap.put(projectDep,newDep);
-						if (!eq(newDep,d)) {
+						if (!getKey(newDep).equals(getKey(d))) {
 							resolve(projectDep, newDep);
 						}
 					}
 				}
 			}
 
-			private boolean eq(Dependency newDep, Dependency d) {
-				if (newDep == d) {
-					return true;
-				}
-				if (d == null) {
-					return false;
-				}
-				return newDep.toString().equals(d.toString());
-			}
 		});
 		
 		
@@ -450,7 +468,7 @@ public class IdentifyMavenDependencyPage extends WizardPage {
 
 	private void displayWarning() {
 		for (Dependency d : getDependencies()) {
-			if (Boolean.FALSE.equals(dependencyResolution.get(d))) {
+			if (!isResolved(d)) {
 				setVisible(warningImg, true);
 				setVisible(warningLink, true);
 				return;
@@ -481,18 +499,6 @@ public class IdentifyMavenDependencyPage extends WizardPage {
 		}
 	}
 	
-    private static String toString(Dependency d) {
-		if (d == null) {
-			return "Unidentified dependency";
-		}
-		StringBuilder text = new StringBuilder(d.getGroupId())
-		.append(":")
-		.append(d.getArtifactId())
-		.append(":")
-		.append(d.getVersion());
-		return text.toString();
-	}
-    
     private void initJobs() {
     	if (identificationJobs == null) {
     		identificationJobs = new HashMap<ProjectDependency, IdentificationJob>(dependencyMap.size());
@@ -541,7 +547,7 @@ public class IdentifyMavenDependencyPage extends WizardPage {
 							Dependency d = job.getDependency();
 							dependencyMap.put(projectDep, d);
 							if (d != null) {
-								dependencyResolution.put(d, job.isResolvable());
+								dependencyResolution.put(getKey(d), job.isResolvable());
 							}
 							refreshUI();
 						}
@@ -573,6 +579,17 @@ public class IdentifyMavenDependencyPage extends WizardPage {
     	}
     }
 
+	protected static String getKey(Dependency d) {
+		StringBuilder sb = new StringBuilder();
+		sb.append(StringUtils.defaultString(d.getGroupId())).append(":");
+		sb.append(StringUtils.defaultString(d.getArtifactId())).append(":");
+		sb.append(StringUtils.defaultString(d.getVersion()));
+		if (StringUtils.isNotEmpty(d.getClassifier())) {
+			sb.append(":").append(d.getClassifier());
+		}
+		return sb.toString();
+	}
+
 	private synchronized void refresh(ProjectDependency key) {
 		if (dependenciesViewer == null || dependenciesViewer.getTable().isDisposed()) {
 			return;
@@ -602,13 +619,9 @@ public class IdentifyMavenDependencyPage extends WizardPage {
 	}
 
 	public List<Dependency> getDependencies() {
-		if (dependenciesViewer == null || dependenciesViewer.getTable().isDisposed()) {
-			return Collections.emptyList();
-		}
-		Object[] selection = dependenciesViewer.getCheckedElements();
-		List<Dependency> dependencies = new ArrayList<Dependency>(selection.length);
-		for (Object o : selection) {
-			ProjectDependency projectDep = (ProjectDependency) o;
+		List<ProjectDependency> checkedProjectDependencies = getCheckedProjectDependencies();
+		List<Dependency> dependencies = new ArrayList<Dependency>(checkedProjectDependencies.size());
+		for (ProjectDependency projectDep : checkedProjectDependencies) {
 			Dependency d = dependencyMap.get(projectDep);
 			if (d != null) {
 				dependencies.add(d);
@@ -617,6 +630,19 @@ public class IdentifyMavenDependencyPage extends WizardPage {
 		return dependencies;
 	}
 
+	public List<ProjectDependency> getCheckedProjectDependencies() {
+		if (dependenciesViewer == null || dependenciesViewer.getTable().isDisposed()) {
+			return Collections.emptyList();
+		}
+		Object[] selection = dependenciesViewer.getCheckedElements();
+		List<ProjectDependency> selectedDeps = new ArrayList<ProjectDependency>(selection.length);
+		for (Object o : selection) {
+			ProjectDependency projectDep = (ProjectDependency) o;
+			selectedDeps.add(projectDep);
+		}
+		return selectedDeps;
+	}
+	
 	public boolean isDeleteJars() {
 		return deleteJars;
 	}
@@ -625,7 +651,7 @@ public class IdentifyMavenDependencyPage extends WizardPage {
 		if (d == null) {
 			return false;
 		}
-		Boolean resolved = dependencyResolution.get(d);
+		Boolean resolved = dependencyResolution.get(getKey(d));
 		return resolved == null? false:resolved.booleanValue();
 	}
 	
@@ -642,7 +668,10 @@ public class IdentifyMavenDependencyPage extends WizardPage {
 					}
 				}
 				Dependency d = dependencyMap.get(projectDep);
-				return IdentifyMavenDependencyPage.toString(d);
+				if (d == null) {
+					return "Unidentified dependency";
+				}
+				return IdentifyMavenDependencyPage.getKey(d);
 			}
 			
 			@Override
@@ -677,5 +706,24 @@ public class IdentifyMavenDependencyPage extends WizardPage {
 		for (IdentificationJob job : identificationJobs.values()) {
 			job.cancel();
 		}
+	}
+
+	public IResource[] getResourcesToDelete() {
+		List<IResource> resources = new ArrayList<IResource>(dependencyMap.size());
+		IPath projectPath = project.getLocation();
+		IWorkspaceRoot root = ResourcesPlugin.getWorkspace().getRoot();
+		for (ProjectDependency pd : dependencyMap.keySet()) {
+			if (pd.getDependencyKind() == DependencyKind.Archive) {
+				IPath p = pd.getPath();
+				if (projectPath.isPrefixOf(p)) {
+					p = p.removeFirstSegments(projectPath.segmentCount() -1);
+				}
+				IFile f = root.getFile(p); 
+				if (f.exists() && project.equals(f.getProject())) {
+					resources.add(f);
+				}
+			}
+		}
+		return resources.toArray(new IResource[0]);
 	}
 }

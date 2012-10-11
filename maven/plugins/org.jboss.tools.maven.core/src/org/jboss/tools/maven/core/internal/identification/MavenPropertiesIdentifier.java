@@ -19,6 +19,8 @@ import java.util.zip.ZipException;
 import java.util.zip.ZipFile;
 
 import org.eclipse.core.runtime.CoreException;
+import org.eclipse.core.runtime.IProgressMonitor;
+import org.eclipse.core.runtime.NullProgressMonitor;
 import org.eclipse.m2e.core.embedder.ArtifactKey;
 
 public class MavenPropertiesIdentifier extends AbstractArtifactIdentifier {
@@ -28,19 +30,37 @@ public class MavenPropertiesIdentifier extends AbstractArtifactIdentifier {
 	}
 
 	public ArtifactKey identify(File file) throws CoreException {
-		ZipFile jar;
+		return identify(file, null);
+	}
+	
+	public ArtifactKey identify(File file, IProgressMonitor monitor) throws CoreException {
+		if (monitor == null) {
+			monitor = new NullProgressMonitor();
+		}
+		if (monitor.isCanceled()) {
+			return null;
+		}
+		ZipFile jar = null;
 		try {
 			jar = new ZipFile(file);
+			monitor.setTaskName("Checking for maven properties in " + file.getName());
 			return getArtifactFromMetaInf(jar);
 		} catch (ZipException e) {
 			e.printStackTrace();
 		} catch (IOException e) {
 			e.printStackTrace();
+		} finally {
+			if (jar != null) {
+				try {
+					jar.close();
+				} catch (IOException e) {
+				}
+			}
 		}
-		//System.err.println(getName() + " could not identify "+file);
 		return null;
 	}
 
+	@SuppressWarnings("nls")
 	protected static ArtifactKey getArtifactFromMetaInf(ZipFile jar) throws IOException {
 		ZipEntry mavenEntry = jar.getEntry("META-INF/maven");//$NON-NLS-1$
 		if (mavenEntry == null) {
